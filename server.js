@@ -55,14 +55,24 @@ app.get('/api/branches', async (req, res) => {
 // Commit history for a branch
 app.get('/api/commits', async (req, res) => {
   try {
-    const { repo, branch, page = 0, limit = 50 } = req.query;
+    const { repo, branch, search } = req.query;
+    const page = Math.max(0, parseInt(req.query.page) || 0);
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit) || 50));
     const git = getGit(repo);
-    const skip = parseInt(page) * parseInt(limit);
-    const log = await git.log({
+    const skip = page * limit;
+
+    const logOpts = {
       [branch]: null,
-      '--max-count': parseInt(limit),
+      '--max-count': limit,
       '--skip': skip,
-    });
+    };
+
+    if (search && search.trim()) {
+      logOpts['--grep'] = search.trim();
+      logOpts['--regexp-ignore-case'] = null;
+    }
+
+    const log = await git.log(logOpts);
     res.json({
       commits: log.all.map(c => ({
         hash: c.hash,
@@ -85,39 +95,37 @@ app.get('/api/diff', async (req, res) => {
     const { repo, hash } = req.query;
     const git = getGit(repo);
 
-    // Get the diff against parent
-    const diffText = await git.diff([`${hash}~1`, hash, '--unified=5']);
+    // Check if commit has a parent
+    let hasParent = true;
+    try {
+      await git.raw(['rev-parse', '--verify', `${hash}~1`]);
+    } catch {
+      hasParent = false;
+    }
 
-    // Get changed files summary
-    const diffStat = await git.diff([`${hash}~1`, hash, '--stat']);
+    let diffText, nameStatus, numstatText;
 
-    // Get list of changed files with status
-    const nameStatus = await git.diff([`${hash}~1`, hash, '--name-status']);
+    if (hasParent) {
+      [diffText, nameStatus, numstatText] = await Promise.all([
+        git.diff([`${hash}~1`, hash, '-M', '--unified=5']),
+        git.diff([`${hash}~1`, hash, '-M', '--name-status']),
+        git.diff([`${hash}~1`, hash, '-M', '--numstat']),
+      ]);
+    } else {
+      [diffText, nameStatus, numstatText] = await Promise.all([
+        git.show([hash, '--unified=5', '-M', '--format=']),
+        git.show([hash, '--name-status', '-M', '--format=']),
+        git.show([hash, '--numstat', '-M', '--format=']),
+      ]);
+    }
 
     const files = parseNameStatus(nameStatus);
     const patches = parseDiff(diffText);
+    const numstat = parseNumstat(numstatText);
 
-    res.json({ files, patches, stat: diffStat });
+    res.json({ files, patches, numstat });
   } catch (err) {
-    // Handle first commit (no parent)
-    try {
-      const { repo, hash } = req.query;
-      const git = getGit(repo);
-      const diffText = await git.diff([
-        '--root',
-        hash,
-        '--unified=5',
-        '--',
-      ]);
-      // For first commit, use show instead
-      const showDiff = await git.show([hash, '--unified=5', '--format=']);
-      const nameStatus = await git.show([hash, '--name-status', '--format=']);
-      const files = parseNameStatus(nameStatus);
-      const patches = parseDiff(showDiff);
-      res.json({ files, patches, stat: '' });
-    } catch (innerErr) {
-      res.status(500).json({ error: innerErr.message });
-    }
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -127,8 +135,10 @@ function parseNameStatus(text) {
     .split('\n')
     .filter(Boolean)
     .map(line => {
-      const match = line.match(/^([AMDRC])\t(.+)$/);
+      // Handle renames: R100\told\tnew and copies: C100\told\tnew
+      const match = line.match(/^([AMDRC]\d*)\t([^\t]+)(?:\t(.+))?$/);
       if (!match) return null;
+      const statusLetter = match[1][0];
       const statusMap = {
         A: 'added',
         M: 'modified',
@@ -136,13 +146,43 @@ function parseNameStatus(text) {
         R: 'renamed',
         C: 'copied',
       };
-      return {
-        status: statusMap[match[1]] || match[1],
-        statusLetter: match[1],
-        path: match[2],
+      const result = {
+        status: statusMap[statusLetter] || statusLetter,
+        statusLetter,
+        path: match[3] || match[2],
       };
+      if (match[3]) {
+        result.oldPath = match[2];
+      }
+      return result;
     })
     .filter(Boolean);
+}
+
+function parseNumstat(text) {
+  const stats = {};
+  text
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .forEach(line => {
+      const parts = line.split('\t');
+      if (parts.length >= 3) {
+        const added = parts[0] === '-' ? 0 : parseInt(parts[0]) || 0;
+        const deleted = parts[1] === '-' ? 0 : parseInt(parts[1]) || 0;
+        // For renames, the path may be in "old => new" format or just the new path
+        const filePath = parts.slice(2).join('\t');
+        // Handle rename format: {old => new}/path or old/path => new/path
+        const renameMatch = filePath.match(/\{(.+) => (.+)\}/);
+        const key = renameMatch
+          ? filePath.replace(/\{.+ => (.+)\}/, '$1')
+          : filePath.includes(' => ')
+            ? filePath.split(' => ').pop()
+            : filePath;
+        stats[key] = { added, deleted };
+      }
+    });
+  return stats;
 }
 
 function parseDiff(diffText) {

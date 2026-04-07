@@ -4,7 +4,8 @@
   "description": "Local Git repository visualizer",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "stop": "kill $(lsof -ti :3000) 2>/dev/null; echo 'Stopped'"
   },
   "keywords": [],
   "author": "",
