@@ -1,0 +1,17 @@
+{
+  "name": "git-differ",
+  "version": "1.0.0",
+  "description": "Local Git repository visualizer",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^5.2.1",
+    "simple-git": "^3.35.2"
+  }
+}
